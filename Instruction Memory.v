@@ -63,7 +63,8 @@ module instruction_memory (
         // Branch test
         // if r9 != 0 jump ahead 2 instructions
         // ----------------------------------------------------
-        mem[10] = {4'b1100,2'b00,4'd0,4'd9,18'd2}; // BRNZ r9, +2
+     // BRNZ r9, +1  (跳到 mem[12])
+        mem[10] = {4'b1100, 2'b00, 4'd0, 4'd9, 18'd1}; // opcode=BRNZ, dtype=0, rs1=9, imm=1
 
         mem[11] = 32'b0; // NOP (should skip)
 
@@ -88,10 +89,8 @@ module instruction_memory (
         mem[15] = {4'b0111,2'b00,4'd12,4'd12,4'd0,14'd0};
 
         // ----------------------------------------------------
-        // Store result
-        // MEM[32] = r12
-        // ----------------------------------------------------
-        mem[16] = {4'b1010,2'b00,4'd12,4'd0,18'd32};
+      // STORE: MEM[32] = r12  -> rs1 = base(0), rs2 = r12, imm = 32
+        mem[16] = {4'b1010, 2'b00, 4'd0, 4'd12, 18'd32}; // opcode=ST, dtype=0, rs1=0, rs2=12, imm=32
 
         // ----------------------------------------------------
         // Infinite Loop

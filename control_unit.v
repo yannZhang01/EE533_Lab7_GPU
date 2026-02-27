@@ -1,21 +1,4 @@
-// control_unit.v
-// Verilog-2001
-// Generates pipeline control signals for a 5-stage pipeline:
-// IF -> ID -> EX -> MEM -> WB
-//
-// - Decodes instruction class in ID
-// - Produces control bundle for ID->EX pipeline register
-// - Detects load-use hazard (1-cycle stall)
-// - Produces forwarding control for EX stage (forwardA, forwardB)
-// - Handles branch/jump flush & pc control via branch_taken_id/branch_target_id
-//
-// Integration notes:
-// - All register numbers are 4-bit (0..15).
-// - imm/branch decision is expected to be computed by the ID stage logic (or external comparator).
-// - If you evaluate branch in EX stage, feed branch_taken_ex / branch_target_ex instead and adjust wiring.
-// - treat opcode 0000 as NOP
-//
-
+`timescale 1ns / 1ps
 module control_unit (
     input  wire         clk,
     input  wire         rst_n,
@@ -23,13 +6,12 @@ module control_unit (
     // ----- Inputs from IF/ID (ID stage) -----
     input  wire [3:0]   opcode_id,
     input  wire [1:0]   dtype_id,
-    input  wire [3:0]   rd_id,
-    input  wire [3:0]   rs1_id,
-    input  wire [3:0]   rs2_id,
-    // If you compute branch condition in ID (recommended), provide:
-    input  wire         branch_cond_id,      // 1 => branch condition true (BRZ/BRNZ decided)
-    input  wire         is_branch_id,        // 1 => this ID opcode is BRZ/BRNZ
-    input  wire [31:0]  branch_target_id,    // byte address computed in ID for branch target
+    input  wire [3:0]   rd_id,         // now matches mapping: rd = bits[25:22]
+    input  wire [3:0]   rs1_id,        // rs1 = bits[21:18]
+    input  wire [3:0]   rs2_id,        // rs2 = bits[17:14]
+    input  wire         branch_cond_id,
+    input  wire         is_branch_id,
+    input  wire [31:0]  branch_target_id,
 
     // ----- Pipeline state info for hazards/forwarding -----
     // EX stage
@@ -40,7 +22,7 @@ module control_unit (
     // MEM stage
     input  wire [3:0]   rd_mem,
     input  wire         regwrite_mem,
-    input  wire         memread_mem, // mem stage load (rare but keep)
+    input  wire         memread_mem,
 
     // WB stage
     input  wire [3:0]   rd_wb,
@@ -48,30 +30,30 @@ module control_unit (
 
     // ----- Outputs -----
     // Stall / Flush / PC control
-    output reg          stall,            // when 1: stall IF/ID and freeze PC
-    output reg          flush_if_id,      // when 1: clear IF/ID (write NOP)
-    output reg          pc_write_en,      // 1 = allow PC to update, 0 = hold PC
-    output reg [1:0]    pc_src_sel,       // 00 = pc+4, 01 = branch_target_id, 10 = jump_target (if used)
-    output reg [31:0]   pc_branch_target, // target byte address (used when pc_src_sel != 00)
+    output reg          stall,
+    output reg          flush_if_id,
+    output reg          pc_write_en,
+    output reg [1:0]    pc_src_sel,
+    output reg [31:0]   pc_branch_target,
 
-    // Forwarding controls for EX stage (select for ALU source A/B)
-    // 00 -> use register file (no forward)
-    // 01 -> forward from EX/MEM (ALU result in MEM stage)
-    // 10 -> forward from MEM/WB (value in WB stage)
+    // Forwarding controls for EX stage
     output reg [1:0]    forwardA,
     output reg [1:0]    forwardB,
 
     // Control bundle to go into ID/EX pipeline register
-    output reg [3:0]    ctrl_alu_op,     // alu opcode for EX stage
+    output reg [3:0]    ctrl_alu_op,
     output reg [1:0]    ctrl_dtype,
     output reg          ctrl_mem_read,
     output reg          ctrl_mem_write,
     output reg          ctrl_reg_write,
-    output reg          ctrl_mem_to_reg, // when 1: writeback from memory; else from ALU/tensor
-    output reg          ctrl_is_tdot     // treat specially if tensor instruction
+    output reg          ctrl_mem_to_reg,
+    output reg          ctrl_is_tdot,
+
+    // NEW: choose ALU second operand: 0 = use reg2 (rs2), 1 = use imm (sign-extended imm18)
+    output reg          ctrl_alu_src
 );
 
-    // local opcode constants (must match your ISA)
+    // opcode constants
     localparam OP_NOP  = 4'b0000;
     localparam OP_ADD  = 4'b0001;
     localparam OP_SUB  = 4'b0010;
@@ -92,7 +74,7 @@ module control_unit (
     // 1) ID-stage decode -> generate control signals for ID/EX (combinational)
     // -----------------------
     always @(*) begin
-        // default control signals
+        // defaults
         ctrl_alu_op     = 4'd0;
         ctrl_dtype      = dtype_id;
         ctrl_mem_read   = 1'b0;
@@ -100,43 +82,69 @@ module control_unit (
         ctrl_reg_write  = 1'b0;
         ctrl_mem_to_reg = 1'b0;
         ctrl_is_tdot    = 1'b0;
+        ctrl_alu_src    = 1'b0; // default: ALU src2 comes from register rs2
 
         case (opcode_id)
             OP_NOP: begin
-                // NOP: all zeros
+                // all zeros
             end
+
+            // R-type ALU ops: ADD, SUB, AND, OR, XOR, MUL, RELU
             OP_ADD, OP_SUB, OP_AND, OP_OR, OP_XOR, OP_MUL, OP_RELU: begin
                 ctrl_alu_op    = opcode_id;
                 ctrl_reg_write = 1'b1;
                 ctrl_mem_to_reg = 1'b0;
-                ctrl_mem_read  = 1'b0;
-                ctrl_mem_write = 1'b0;
                 ctrl_is_tdot   = 1'b0;
+                ctrl_alu_src   = 1'b0; // use rs2
             end
+
+            // ADDI: use immediate as src2
             OP_ADDI: begin
                 ctrl_alu_op    = OP_ADD;
                 ctrl_reg_write = 1'b1;
                 ctrl_mem_to_reg = 1'b0;
+                ctrl_alu_src   = 1'b1; // use immediate (imm18) as ALU src2
             end
+
+            // Load: address = rs1 + imm ; writeback from memory
             OP_LD: begin
-                ctrl_alu_op    = OP_ADD; // address calc (rs1 + imm)
+                ctrl_alu_op    = OP_ADD; // address calc
                 ctrl_mem_read  = 1'b1;
                 ctrl_reg_write = 1'b1;
                 ctrl_mem_to_reg = 1'b1;
+                ctrl_alu_src   = 1'b1; // use imm as src2 (rs1 + imm)
             end
+
+            // Store: address = rs1 + imm ; write data from rs2
             OP_ST: begin
                 ctrl_alu_op    = OP_ADD; // address calc
                 ctrl_mem_write = 1'b1;
                 ctrl_reg_write = 1'b0;
+                ctrl_alu_src   = 1'b1; // use imm as src2 for address calculation
             end
-            OP_BRZ, OP_BRNZ, OP_JUMP: begin
-                // branches don't write registers here
+
+            // Branches: BRZ/BRNZ: no reg write; branch decision done in ID
+            OP_BRZ, OP_BRNZ: begin
+                // nothing to write back
+                ctrl_reg_write = 1'b0;
+                ctrl_alu_src   = 1'b1; // branches may use imm for target calc in ID (we compute target in ID)
             end
+
+            // Jump
+            OP_JUMP: begin
+                ctrl_reg_write = 1'b0;
+                ctrl_alu_src   = 1'b1;
+            end
+
+            // Tensor dot
             OP_TDOT: begin
-                ctrl_alu_op    = OP_TDOT; // EX stage should route to tensor unit
+                ctrl_alu_op    = OP_TDOT;
                 ctrl_reg_write = 1'b1;
                 ctrl_is_tdot   = 1'b1;
+                ctrl_mem_to_reg = 1'b0;
+                ctrl_alu_src   = 1'b0; // tensor consumes two registers (or forwarded values)
             end
+
             default: begin
                 // treat unknown as NOP
             end
@@ -144,61 +152,32 @@ module control_unit (
     end
 
     // -----------------------
-    // 2) Load-use hazard detection (ID stage needs values but EX stage is loading)
-    //    If EX is a load and its destination equals rs1_id or rs2_id, we must stall
-    //    Typical behavior: insert one bubble (freeze IF/ID and ID signals), and insert NOP into ID/EX
+    // 2) Load-use hazard detection (ID stage)
+    // If EX stage is a load and it writes to a reg that ID next needs as source, stall.
+    // Note: for stores, rs2 is data; for loads/addi/etc we compare the appropriate sources.
     // -----------------------
     wire load_use_hazard;
     assign load_use_hazard = (memread_ex && (rd_ex != 4'd0) &&
-                              ((rd_ex == rs1_id) || (rd_ex == rs2_id)));
+                              ( (rd_ex == rs1_id) || (rd_ex == rs2_id) ));
 
     // -----------------------
-    // 3) Forwarding unit for ALU operands in EX stage
-    //    We compute forwarding based on EX-stage Rs (signals come from EX stage)
-    //    EX stage sources are compared to rd in MEM and WB stages.
-    //    forward priority: EX stage result (if available) > MEM stage > WB stage.
-    //    Here we output control for EX stage multiplexer.
+    // 3) Forwarding unit for EX stage (combinational)
+    //    forward priority: MEM stage > WB stage
     // -----------------------
-    // For compute of forward signals we need rs1_ex/rs2_ex; top-level should feed them
-    // However we can compute forwarding based on rs1_id/rs2_id when used in EX next cycle if you choose.
-    // We'll compute forwarding for current EX stage using rd_ex/rd_mem/rd_wb and regwrite signals.
-    //
-    // NOTE: The top-level must call this module every cycle with current pipeline register contents:
-    //       rs1_id/rs2_id used for hazard detection; forwarding logic uses rd_ex/rd_mem/rd_wb and regwrite flags.
-    //
-    // We'll implement forwarding as follows:
-    //   forwardX = 2'b01 -> take value from MEM stage (rd_mem)
-    //   forwardX = 2'b10 -> take value from WB stage  (rd_wb)
-    //   forwardX = 2'b00 -> use register file value (no forward)
-    //
-
     always @(*) begin
-        // default: no forward
         forwardA = 2'b00;
         forwardB = 2'b00;
 
-        // Check EX hazard: if EX stage will write and rd_ex matches ID/EX rs1/rs2? (this is for next cycle)
-        // Usually forwarding checks compare EX/MEM (which holds ALU result) and MEM/WB.
-        // Use rd_mem/regwrite_mem for MEM source; rd_wb/regwrite_wb for WB source.
-
-        // Forwarding for the value needed in EX stage (sources are from ID/EX in real pipeline).
-        // The top-level should compare rs1_ex/rs2_ex (not rs1_id). Here we approximate by using rs1_id/rs2_id
-        // which is valid if forwarding is computed for the next cycle (ID->EX). For safe operation, top-level
-        // can re-evaluate forwarding using actual rs1_ex/rs2_ex or simply pass them here.
-        //
-        // We adopt a common scheme:
-        // If (rd_mem != 0 && regwrite_mem && (rd_mem == rs1_id)) forwardA = 2'b01;
-        // else if (rd_wb != 0 && regwrite_wb && (rd_wb == rs1_id)) forwardA = 2'b10;
-        // Same for B.
-
+        // forward for A (source from rs1_id)
         if ((rd_mem != 4'd0) && regwrite_mem && (rd_mem == rs1_id)) begin
-            forwardA = 2'b01;
+            forwardA = 2'b01; // from MEM stage (ex_ result in mem_alu_result)
         end else if ((rd_wb != 4'd0) && regwrite_wb && (rd_wb == rs1_id)) begin
-            forwardA = 2'b10;
+            forwardA = 2'b10; // from WB stage (wb_value)
         end else begin
             forwardA = 2'b00;
         end
 
+        // forward for B (source from rs2_id) - used when ALU expects rs2
         if ((rd_mem != 4'd0) && regwrite_mem && (rd_mem == rs2_id)) begin
             forwardB = 2'b01;
         end else if ((rd_wb != 4'd0) && regwrite_wb && (rd_wb == rs2_id)) begin
@@ -209,32 +188,25 @@ module control_unit (
     end
 
     // -----------------------
-    // 4) Branch handling & pipeline flush logic
-    //    We assume branch condition is evaluated in ID stage (branch_cond_id).
-    //    If branch is taken in ID stage:
-    //      - we want to flush IF/ID (insert NOP)
-    //      - update PC to branch_target_id in next cycle (pc_src_sel, pc_branch_target)
-    //    Note: If your branches are decided in EX stage, adapt inputs to branch_cond_ex/target_ex.
+    // 4) Branch handling & pipeline flush / stall logic (combinational)
+    //    branch_cond_id and is_branch_id are evaluated in ID stage by top-level.
     // -----------------------
     always @(*) begin
-        // default outputs
+        // defaults
         stall = 1'b0;
         flush_if_id = 1'b0;
-        pc_write_en = 1'b1;         // allow PC to update by default
-        pc_src_sel = 2'b00;         // default pc+4
+        pc_write_en = 1'b1;
+        pc_src_sel = 2'b00;
         pc_branch_target = 32'd0;
 
-        // 1) load-use hazard: stall pipeline
+        // 1) load-use hazard: stall a cycle
         if (load_use_hazard) begin
             stall = 1'b1;
-            // when stalling due to load-use, we also must prevent IF from writing new IF/ID
-            // and insert bubble in ID/EX (top-level will write a NOP into ID/EX).
-            pc_write_en = 1'b0; // freeze PC
-            flush_if_id = 1'b0; // do not flush, just freeze IF/ID
+            pc_write_en = 1'b0; // freeze PC while stalling
+            flush_if_id = 1'b0; // keep IF/ID as-is (we will inject bubble into ID/EX)
         end
 
-        // 2) branch taken in ID stage -> flush IF/ID and redirect PC
-        //    branch_cond_id is asserted by ID stage comparator
+        // 2) branch taken in ID stage
         else if (is_branch_id && branch_cond_id) begin
             flush_if_id = 1'b1;
             pc_src_sel = 2'b01;
@@ -242,7 +214,7 @@ module control_unit (
             pc_write_en = 1'b1;
         end
 
-        // 3) JUMP: treat like branch (unconditional)
+        // 3) jump
         else if (opcode_id == OP_JUMP) begin
             flush_if_id = 1'b1;
             pc_src_sel = 2'b01;

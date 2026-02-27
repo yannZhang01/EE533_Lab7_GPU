@@ -7,15 +7,6 @@ module gpu_alu (
     output reg [63:0] result
 );
 
-    // localparam OP_ADD  = 4'b0000;
-    // localparam OP_SUB  = 4'b0001;
-    // localparam OP_AND  = 4'b0010;
-    // localparam OP_OR   = 4'b0011;
-    // localparam OP_XOR  = 4'b0100;
-    // localparam OP_MUL  = 4'b0101;
-    // //localparam OP_MAC  = 4'b0110;
-    // localparam OP_RELU = 4'b0111;
-
     localparam OP_ADD  = 4'b0001;
     localparam OP_SUB  = 4'b0010;
     localparam OP_AND  = 4'b0011;
