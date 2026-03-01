@@ -48,6 +48,8 @@ module control_unit (
     output reg          ctrl_reg_write,
     output reg          ctrl_mem_to_reg,
     output reg          ctrl_is_tdot,
+    output reg          ctrl_tensor_relu,
+    output reg          ctrl_ex_freeze,
 
     // NEW: choose ALU second operand: 0 = use reg2 (rs2), 1 = use imm (sign-extended imm18)
     output reg          ctrl_alu_src
@@ -69,6 +71,7 @@ module control_unit (
     localparam OP_BRNZ = 4'b1100;
     localparam OP_JUMP = 4'b1101;
     localparam OP_TDOT = 4'b1110;
+    localparam OP_TDOT_RELU = 4'b1111;
 
     // -----------------------
     // 1) ID-stage decode -> generate control signals for ID/EX (combinational)
@@ -82,6 +85,7 @@ module control_unit (
         ctrl_reg_write  = 1'b0;
         ctrl_mem_to_reg = 1'b0;
         ctrl_is_tdot    = 1'b0;
+        ctrl_tensor_relu = 1'b0;
         ctrl_alu_src    = 1'b0; // default: ALU src2 comes from register rs2
 
         case (opcode_id)
@@ -90,12 +94,22 @@ module control_unit (
             end
 
             // R-type ALU ops: ADD, SUB, AND, OR, XOR, MUL, RELU
-            OP_ADD, OP_SUB, OP_AND, OP_OR, OP_XOR, OP_MUL, OP_RELU: begin
+            OP_ADD, OP_SUB, OP_AND, OP_OR, OP_XOR, OP_RELU: begin
                 ctrl_alu_op    = opcode_id;
                 ctrl_reg_write = 1'b1;
                 ctrl_mem_to_reg = 1'b0;
                 ctrl_is_tdot   = 1'b0;
                 ctrl_alu_src   = 1'b0; // use rs2
+            end
+
+            // For Multiply
+            OP_MUL: begin
+                ctrl_alu_op    = opcode_id;
+                ctrl_reg_write = 1'b1;
+                ctrl_mem_to_reg = 1'b0;
+                ctrl_is_tdot   = 1'b0;
+                ctrl_alu_src   = 1'b0; // use rs2
+                ctrl_ex_freeze = 1'b1; // freeze EX stage for multi-cycle op
             end
 
             // ADDI: use immediate as src2
@@ -143,7 +157,22 @@ module control_unit (
                 ctrl_is_tdot   = 1'b1;
                 ctrl_mem_to_reg = 1'b0;
                 ctrl_alu_src   = 1'b0; // tensor consumes two registers (or forwarded values)
+                ctrl_tensor_relu = 1'b0;
+                ctrl_ex_freeze = 1'b1; // freeze EX stage for multi-cycle op
             end
+
+            // Tensor dot relu
+            OP_TDOT_RELU: begin
+                ctrl_alu_op    = OP_TDOT_RELU;
+                ctrl_reg_write = 1'b1;
+                ctrl_is_tdot   = 1'b1;
+                ctrl_mem_to_reg = 1'b0;
+                ctrl_alu_src   = 1'b0;
+                ctrl_tensor_relu = 1'b1;
+                ctrl_ex_freeze = 1'b1; // freeze EX stage for multi-cycle op
+            end
+
+
 
             default: begin
                 // treat unknown as NOP
@@ -169,16 +198,16 @@ module control_unit (
         forwardB = 2'b00;
 
         // forward for A (source from rs1_id)
-        if ((rd_mem != 4'd0) && regwrite_mem && (rd_mem == rs1_id)) begin
+        if ((rd_mem != 4'd0) && (rs1_id != 4'd0) && regwrite_mem && (rd_mem == rs1_id)) begin
             forwardA = 2'b01; // from MEM stage (ex_ result in mem_alu_result)
-        end else if ((rd_wb != 4'd0) && regwrite_wb && (rd_wb == rs1_id)) begin
+        end else if ((rd_wb != 4'd0) && (rs1_id != 4'd0) && regwrite_wb && (rd_wb == rs1_id)) begin
             forwardA = 2'b10; // from WB stage (wb_value)
         end else begin
             forwardA = 2'b00;
         end
 
         // forward for B (source from rs2_id) - used when ALU expects rs2
-        if ((rd_mem != 4'd0) && regwrite_mem && (rd_mem == rs2_id)) begin
+        if ((rd_mem != 4'd0) && (rs2_id != 4'd0) && regwrite_mem && (rd_mem == rs2_id)) begin
             forwardB = 2'b01;
         end else if ((rd_wb != 4'd0) && regwrite_wb && (rd_wb == rs2_id)) begin
             forwardB = 2'b10;

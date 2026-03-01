@@ -3,7 +3,7 @@
 // 5-stage pipeline top that matches uploaded submodules' ports/names.
 // - IF -> ID -> EX -> MEM -> WB
 // - Integrates with control_unit.v (stall/flush/forwarding/pc control)
-// - Uses gpu_pc, instruction_memory, regfile, gpu_alu, tensor_unit, gpu_dmem
+// - Uses gpu_pc, gpu_imem, regfile, gpu_alu, tensor_unit, gpu_dmem
 
 module pipeline_top (
     input  wire clk,
@@ -14,34 +14,38 @@ module pipeline_top (
     // IF Stage: PC + I-Mem
     // -------------------------
     wire [31:0] pc;
-    wire [31:0] pc_plus4;
+    wire [31:0] pc_plus1;
 
     // control signals from control_unit
     wire        stall;           // stall pipeline (freeze IF/ID & PC)
     wire        flush_if_id;     // clear IF/ID
     wire        pc_write_en;     // allow PC update (not used directly here; we map to gpu_pc stall)
-    wire [1:0]  pc_src_sel;      // 00 = pc+4, 01 = branch_target, 10 = jump (not used separately)
+    wire [1:0]  pc_src_sel;      // 00 = pc+1, 01 = branch_target, 10 = jump (not used separately)
     wire [31:0] pc_branch_target;
 
-    // gpu_pc has: clk, rst_n, stall, branch_valid, branch_target -> pc, pc_plus4
+    // gpu_pc has: clk, rst_n, stall, branch_valid, branch_target -> pc, pc_plus1
     // We'll map branch_valid = (pc_src_sel != 2'b00)
-    wire branch_valid = (pc_src_sel != 2'b00);
+    wire branch_valid;
+    assign branch_valid = (pc_src_sel != 2'b00);
+    wire pc_freeze; // signal to freeze PC updates (stall or EX freeze)
+    assign pc_freeze = (ex_freeze || !pc_write_en); // freeze PC when not allowed to update
 
     gpu_pc #(
         .ADDR_WIDTH(32)
     ) u_pc (
         .clk(clk),
         .rst_n(rst_n),
-        .stall(stall),                // freeze PC when stall asserted by control_unit
+        .stall(stall), 
+        .pc_freeze(pc_freeze), // freeze PC when pc_write_en is 0 or ex_freeze is 1 (i.e., not allowed to update)
         .branch_valid(branch_valid),  // taken when control says so
         .branch_target(pc_branch_target),
         .pc(pc),
-        .pc_plus4(pc_plus4)
+        .pc_plus1(pc_plus1)
     );
 
-    // Instruction memory (module name in file: instruction_memory)
+    // Instruction memory (module name in file: gpu_imem)
     wire [31:0] instr;
-    instruction_memory u_imem (
+    gpu_imem u_imem (
         .addr(pc),
         .instr(instr)
     );
@@ -63,6 +67,10 @@ module pipeline_top (
                 // hold IF/ID (don't update)
                 ifid_instr <= ifid_instr;
                 ifid_pc    <= ifid_pc;
+            end else if (ex_freeze) begin
+                // EX stage freeze: hold IF/ID but allow PC to update (for branch delay slot)
+                ifid_instr <= ifid_instr;
+                ifid_pc    <= ifid_pc;
             end else begin
                 ifid_instr <= instr;
                 ifid_pc    <= pc;
@@ -82,7 +90,7 @@ module pipeline_top (
     wire [3:0] id_rs2    = ifid_instr[17:14];   
     wire [17:0] imm18    = ifid_instr[17:0];
 
-    wire [31:0] id_branch_target = ifid_pc + 4 + {{12{imm18[17]}}, imm18, 2'b00};
+    wire [31:0] id_branch_target = ifid_pc + 1 + {{14{imm18[17]}}, imm18};
 
     // regfile ports: rs1_addr, rs2_addr -> rs1_data, rs2_data ; rd, write_data, regwrite
     wire [63:0] id_rs1_data;
@@ -111,10 +119,14 @@ module pipeline_top (
 
     // Compute branch condition in ID (BRZ/BRNZ): treat zero/non-zero on rs1
     // Control unit expects branch_cond_id and is_branch_id
-    wire id_is_brz  = (id_opcode == 4'b1011); // OP_BRZ
-    wire id_is_brnz = (id_opcode == 4'b1100); // OP_BRNZ
-    wire id_is_branch = id_is_brz | id_is_brnz;
-    wire id_branch_cond = (id_is_brz && (id_rs1_data == 64'd0)) ||
+    wire id_is_brz; // OP_BRZ
+    assign id_is_brz = (id_opcode == 4'b1011); // OP_BRZ
+    wire id_is_brnz; // OP_BRNZ
+    assign id_is_brnz = (id_opcode == 4'b1100); // OP_BRNZ
+    wire id_is_branch;
+    assign id_is_branch = id_is_brz | id_is_brnz;
+    wire id_branch_cond;
+    assign id_branch_cond = (id_is_brz && (id_rs1_data == 64'd0)) ||
                           (id_is_brnz && (id_rs1_data != 64'd0));
 
     // -------------------------
@@ -141,6 +153,8 @@ module pipeline_top (
     wire       ctrl_reg_write;
     wire       ctrl_mem_to_reg;
     wire       ctrl_is_tdot;
+    wire       ctrl_tensor_relu;
+    wire       ctrl_ex_freeze;
 
     control_unit u_ctrl (
         .clk(clk),
@@ -185,8 +199,8 @@ module pipeline_top (
         .ctrl_reg_write(ctrl_reg_write),
         .ctrl_mem_to_reg(ctrl_mem_to_reg),
         .ctrl_is_tdot(ctrl_is_tdot),
-
-        // NEW output
+        .ctrl_tensor_relu(ctrl_tensor_relu),
+        .ctrl_ex_freeze(ctrl_ex_freeze),
         .ctrl_alu_src(ctrl_alu_src)
     );
 
@@ -202,6 +216,8 @@ module pipeline_top (
     reg        ex_memwrite;
     reg        ex_memtoreg;
     reg        ex_is_tdot;
+    reg        ex_tensor_relu;
+    reg        ex_freeze;
     reg [3:0]  ex_alu_op;
 
     // *** CHANGED: need to carry immediate and alu_src into EX stage ***
@@ -222,6 +238,8 @@ module pipeline_top (
             ex_memtoreg  <= 1'b0;
             ex_is_tdot   <= 1'b0;
             ex_alu_op    <= 4'd0;
+            ex_tensor_relu <= 1'b0;
+            ex_freeze     <= 1'b0;
             ex_imm18     <= 18'd0;
             ex_alu_src   <= 1'b0;
         end else begin
@@ -238,8 +256,30 @@ module pipeline_top (
                 ex_is_tdot   <= 1'b0;
                 ex_alu_op    <= 4'd0;
                 ex_imm18     <= 18'd0;
+                ex_tensor_relu <= 1'b0;
+                ex_freeze    <= 1'b0;
                 ex_alu_src   <= 1'b0;
-            end else begin
+            end
+            
+            else if (ex_freeze) begin
+                // EX stage freeze: hold EX register values but don't update them
+                ex_rs1_data  <= ex_rs1_data;
+                ex_rs2_data  <= ex_rs2_data;
+                ex_dtype     <= ex_dtype;
+                ex_rd        <= ex_rd;
+                ex_regwrite  <= ex_regwrite;
+                ex_memread   <= ex_memread;
+                ex_memwrite  <= ex_memwrite;
+                ex_memtoreg  <= ex_memtoreg;
+                ex_is_tdot   <= ex_is_tdot;
+                ex_alu_op    <= ex_alu_op;
+                ex_imm18     <= ex_imm18;
+                ex_tensor_relu <= ex_tensor_relu;
+                ex_freeze    <= 1'b0; // set freeze flag
+                ex_alu_src   <= ctrl_alu_src; // reset alu_src to default value
+            end
+            
+            else begin
                 ex_rs1_data  <= id_rs1_data;
                 ex_rs2_data  <= id_rs2_data;
                 ex_dtype     <= ctrl_dtype;     // from control_unit
@@ -249,6 +289,8 @@ module pipeline_top (
                 ex_memwrite  <= ctrl_mem_write;
                 ex_memtoreg  <= ctrl_mem_to_reg;
                 ex_is_tdot   <= ctrl_is_tdot;
+                ex_tensor_relu <= ctrl_tensor_relu;
+                ex_freeze     <= ctrl_ex_freeze;
                 ex_alu_op    <= ctrl_alu_op;
                 ex_imm18     <= imm18;          // latch immediate into EX
                 ex_alu_src   <= ctrl_alu_src;   // latch ctrl selection
@@ -280,20 +322,25 @@ module pipeline_top (
     // 01 -> forward from MEM stage (mem_alu_result)
     // 10 -> forward from WB stage (wb_value)
     // Forwarded operand selection (shared by ALU and Tensor)
-    wire [63:0] ex_op_src1 = (forwardA == 2'b01) ? mem_alu_result :
-                             (forwardA == 2'b10) ? wb_value :
-                                                   ex_rs1_data;
+    // Forwarded EX src1
+    wire [63:0] ex_op_src1;
+    assign ex_op_src1 = (forwardA == 2'b01) ? mem_alu_result :
+                        (forwardA == 2'b10) ? wb_value :
+                                            ex_rs1_data;
 
-    // *** CHANGED: compute forwarded register source first, then choose imm/reg ***
-    wire [63:0] ex_reg_src2 = (forwardB == 2'b01) ? mem_alu_result :
-                              (forwardB == 2'b10) ? wb_value :
-                                                    ex_rs2_data;
+    // Forwarded EX register src2 (before imm/reg select)
+    wire [63:0] ex_reg_src2;
+    assign ex_reg_src2 = (forwardB == 2'b01) ? mem_alu_result :
+                        (forwardB == 2'b10) ? wb_value :
+                                            ex_rs2_data;
 
     // Sign-extend ex_imm18 to 64-bit
-    wire [63:0] ex_imm_ext = {{46{ex_imm18[17]}}, ex_imm18};
+    wire [63:0] ex_imm_ext;
+    assign ex_imm_ext = {{46{ex_imm18[17]}}, ex_imm18};
 
     // Final EX src2 selection: if ex_alu_src==1 use imm, else use forwarded register value
-    wire [63:0] ex_op_src2 = (ex_alu_src) ? ex_imm_ext : ex_reg_src2;
+    wire [63:0] ex_op_src2;
+    assign ex_op_src2 = (ex_alu_src) ? ex_imm_ext : ex_reg_src2;
 
     // ALU instantiation (gpu_alu expects alu_op, datatype, src1, src2)
     wire [63:0] alu_result;
@@ -310,7 +357,7 @@ module pipeline_top (
     tensor_unit u_tensor (
         .a(ex_op_src1),
         .b(ex_op_src2),
-        .relu(1'b0),
+        .relu(ex_tensor_relu),
         .result(tdot_result)
     );
 
@@ -328,7 +375,20 @@ module pipeline_top (
             mem_memread    <= 1'b0;
             mem_memwrite   <= 1'b0;
             mem_memtoreg   <= 1'b0;
-        end else begin
+        end 
+        
+        else if (ex_freeze) begin
+            // EX stage freeze: hold MEM register values but don't update them
+            mem_alu_result <= mem_alu_result;
+            mem_write_data <= mem_write_data;
+            mem_rd         <= mem_rd;
+            mem_regwrite   <= mem_regwrite;
+            mem_memread    <= mem_memread;
+            mem_memwrite   <= mem_memwrite;
+            mem_memtoreg   <= mem_memtoreg;
+        end
+        
+        else begin
             mem_alu_result <= ex_result;
             mem_write_data <= ex_rs2_data;  // carry store data into MEM stage
             mem_rd         <= ex_rd;
@@ -361,7 +421,16 @@ module pipeline_top (
             wb_value       <= 64'd0;
             wb_rd_reg      <= 4'd0;
             wb_regwrite_reg<= 1'b0;
-        end else begin
+        end 
+        
+        else if (ex_freeze) begin
+            // EX stage freeze: hold WB register values but don't update them
+            wb_value       <= wb_value;
+            wb_rd_reg      <= wb_rd_reg;
+            wb_regwrite_reg<= wb_regwrite_reg;
+        end
+        
+        else begin
             // writeback value: from memory if memtoreg else from ALU result
             wb_value        <= mem_memtoreg ? mem_read_data : mem_alu_result;
             wb_rd_reg       <= mem_rd;

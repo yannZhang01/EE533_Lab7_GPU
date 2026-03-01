@@ -1,32 +1,37 @@
-
+// ============================================================
+// Program Counter (PC) module for GPU pipeline
+// ============================================================
 module gpu_pc #(
-    parameter ADDR_WIDTH = 32,
-    parameter PC_RESET_ADDR = 32'h0000_0000
+    parameter ADDR_WIDTH = 9,
+    parameter [ADDR_WIDTH-1:0] PC_RESET = {ADDR_WIDTH{1'b0}}
 )(
-    input  wire                   clk,
-    input  wire                   rst_n,          // Active-low synchronous reset
-    input  wire                   stall,          // 1 = hold PC
-    input  wire                   branch_valid,   // 1 = take branch
-    input  wire [ADDR_WIDTH-1:0]  branch_target,  // Branch target address
+    input  wire                     clk,
+    input  wire                     reset,
 
-    output reg  [ADDR_WIDTH-1:0]  pc,             // Current PC
-    output wire [ADDR_WIDTH-1:0]  pc_plus4        // PC + 4
+    // Stall control: 1 = update PC, 0 = hold PC
+    input  wire                     pc_enable,
+
+    // Branch redirect
+    input  wire                     pc_branch_valid,
+    input  wire [ADDR_WIDTH-1:0]     pc_branch_target,
+
+    // Default next PC candidate computed in IF stage
+    input  wire [ADDR_WIDTH-1:0]     pc_next,
+
+    // Current PC value for IMEM address this cycle
+    output reg  [ADDR_WIDTH-1:0]     pc_current
 );
 
-    assign pc_plus4 = pc + 4;
+    wire [ADDR_WIDTH-1:0] pc_load_value;
+
+    // Priority: branch > default
+    assign pc_load_value = pc_branch_valid ? pc_branch_target : pc_next;
 
     always @(posedge clk) begin
-        if (!rst_n) begin
-            pc <= PC_RESET_ADDR;
-        end
-        else if (stall) begin
-            pc <= pc;   // Hold current PC
-        end
-        else if (branch_valid) begin
-            pc <= branch_target;
-        end
-        else begin
-            pc <= pc + 4;
+        if (reset) begin
+            pc_current <= PC_RESET;
+        end else if (pc_enable) begin
+            pc_current <= pc_load_value;
         end
     end
 
