@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<nf:module xmlns:nf="http://www.NetFPGA.org/NF2_register_system"
+           xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+           xsi:schemaLocation="http://www.NetFPGA.org/NF2_register_system NF2_register_system.xsd ">
+
+  <nf:name>gpu_top</nf:name>
+  <nf:prefix>gpu</nf:prefix>
+  <nf:location>udp</nf:location>
+  <nf:description>Registers for GPU Datapath IP</nf:description>
+  <nf:blocksize>64</nf:blocksize>
+
+  <nf:registers>
+
+    <!-- 9 software registers -->
+
+    <nf:register>
+      <nf:name>imem_interact</nf:name>
+      <nf:description>bit0: IMEM interact enable</nf:description>
+      <nf:type>generic_software32</nf:type>
+    </nf:register>
+
+    <nf:register>
+      <nf:name>imem_write</nf:name>
+      <nf:description>bit0: IMEM write enable</nf:description>
+      <nf:type>generic_software32</nf:type>
+    </nf:register>
+
+    <nf:register>
+      <nf:name>imem_rw_address</nf:name>
+      <nf:description>IMEM address</nf:description>
+      <nf:type>generic_software32</nf:type>
+    </nf:register>
+
+    <nf:register>
+      <nf:name>imem_wdata</nf:name>
+      <nf:description>IMEM write data</nf:description>
+      <nf:type>generic_software32</nf:type>
+    </nf:register>
+
+    <nf:register>
+      <nf:name>dmem_interact</nf:name>
+      <nf:description>bit0: DMEM interact enable</nf:description>
+      <nf:type>generic_software32</nf:type>
+    </nf:register>
+
+    <nf:register>
+      <nf:name>dmem_write</nf:name>
+      <nf:description>bit0: DMEM write enable</nf:description>
+      <nf:type>generic_software32</nf:type>
+    </nf:register>
+
+    <nf:register>
+      <nf:name>dmem_rw_address</nf:name>
+      <nf:description>DMEM address</nf:description>
+      <nf:type>generic_software32</nf:type>
+    </nf:register>
+
+    <nf:register>
+      <nf:name>dmem_wdata_upper</nf:name>
+      <nf:description>DMEM write data upper 32 bits</nf:description>
+      <nf:type>generic_software32</nf:type>
+    </nf:register>
+
+    <nf:register>
+      <nf:name>dmem_wdata_lower</nf:name>
+      <nf:description>DMEM write data lower 32 bits</nf:description>
+      <nf:type>generic_software32</nf:type>
+    </nf:register>
+
+    <!-- 3 hardware registers -->
+
+    <nf:register>
+      <nf:name>imem_rdata</nf:name>
+      <nf:description>IMEM readback data</nf:description>
+      <nf:type>generic_hardware32</nf:type>
+    </nf:register>
+
+    <nf:register>
+      <nf:name>dmem_rdata_upper</nf:name>
+      <nf:description>DMEM readback upper 32 bits</nf:description>
+      <nf:type>generic_hardware32</nf:type>
+    </nf:register>
+
+    <nf:register>
+      <nf:name>dmem_rdata_lower</nf:name>
+      <nf:description>DMEM readback lower 32 bits</nf:description>
+      <nf:type>generic_hardware32</nf:type>
+    </nf:register>
+
+  </nf:registers>
+</nf:module>
