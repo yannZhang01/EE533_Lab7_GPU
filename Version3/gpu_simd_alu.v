@@ -25,7 +25,7 @@ module gpu_simd_alu (
     reg [15:0] a16[3:0], b16[3:0], r16[3:0];
     reg [7:0]  a8[7:0],  b8[7:0],  r8[7:0];
 
-    always @(*) begin
+    always @(alu_op or alu_datatype or alu_input1 or alu_input2) begin
         alu_output = 64'b0;
 
         case (alu_datatype)

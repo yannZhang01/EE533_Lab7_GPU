@@ -22,19 +22,17 @@ module gpu_imem #(
     reg [DATA_WIDTH-1:0] mem [0:MEM_SIZE-1];
     integer i;
 
+    initial begin
+        $readmemh("bubble_sort_10_clean.hex", mem);
+    end
+
     // Read instruction (combinational)
     assign imem_instr = mem[imem_read_addr];
 
     // Write instruction (synchronous)
     always @(posedge clk) begin
         if (reset) begin
-            // mem[0] <= {4'b1001, 2'b00, 4'b0001, 22'b0};
-            // mem[1] <= {4'b1001, 2'b00, 4'b0010, 22'b0};
-            // mem[2] <= {4'b0001, 2'b00, 4'b0011, 22'b0};
-
-            for (i = 0; i < MEM_SIZE; i = i + 1) begin
-                mem[i] <= 32'h00000000;
-            end
+            // onboard version do nothing
         end else if (imem_write_en) begin
             mem[imem_write_addr] <= imem_write_data;
         end

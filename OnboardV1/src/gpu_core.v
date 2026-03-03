@@ -44,9 +44,29 @@ module gpu_core #(
     wire [INST_ADDR_WIDTH-1:0] if_pc_plus1;
     wire [INST_ADDR_WIDTH-1:0] if_pc_next_default;
 
+    wire pipeline_freeze;
+    reg [3:0] id_ex_alu_op;
+    wire is_multi_cycle =
+           (id_ex_alu_op == OP_MUL) ||
+           (id_ex_alu_op == OP_TDOT) ||
+           (id_ex_alu_op == OP_TDOT_RELU);
+
+    reg [3:0] freeze_counter;
+    assign pipeline_freeze = is_multi_cycle || (freeze_counter != 0);
+    
     // Sequential next PC (PC + 1).
     assign if_pc_plus1        = if_pc_current + 1'b1;
     assign if_pc_next_default = pipeline_freeze ? if_pc_current : if_pc_plus1;
+
+    wire id_branch_taken;
+    wire [3:0]  id_instr_opcode_id;
+    wire [DATA_WIDTH-1:0] id_rs1_data;
+    assign id_branch_taken = (id_instr_opcode_id == OP_BRZ)  ? (id_rs1_data == 0) :
+                             (id_instr_opcode_id == OP_BRNZ) ? (id_rs1_data != 0) : 1'b0;
+                             
+    wire [INST_ADDR_WIDTH-1:0] id_branch_target;
+    wire signed [INST_ADDR_WIDTH:0] id_br_s;
+    assign id_branch_target = id_br_s[INST_ADDR_WIDTH-1:0]; // wraps naturally in 9-bit space
 
     // PC state register with redirect support
     gpu_pc #(.ADDR_WIDTH(INST_ADDR_WIDTH)) pc (
@@ -106,7 +126,6 @@ module gpu_core #(
     // [21:18] rs1 (source register 1)
     // [17:14] rs2 (source register 2)
     // [17:0]  imm (immediate value, can be sign-extended)
-    wire [3:0]  id_instr_opcode_id;
     wire [1:0]  id_instr_dtype_id;
     wire [3:0]  id_instr_rd_addr;
     wire [3:0]  id_instr_rs1_addr;
@@ -134,7 +153,6 @@ module gpu_core #(
     assign id_imm_ext64 = {{32{id_imm_ext32[31]}}, id_imm_ext32}; // sign-extend to 64 bits
 
     // accept output of register file
-    wire [DATA_WIDTH-1:0] id_rs1_data;
     wire [DATA_WIDTH-1:0] id_rs2_data;
 
     // WB wires (declared here as in your original code)
@@ -195,21 +213,14 @@ module gpu_core #(
     // ============================================================
     // Branch Unit
     // ============================================================
-    wire id_branch_taken;
-    assign id_branch_taken = (id_instr_opcode_id == OP_BRZ)  ? (id_rs1_data == 0) :
-                             (id_instr_opcode_id == OP_BRNZ) ? (id_rs1_data != 0) : 1'b0;
 
     // Treat PC and offset as signed for branch target computation
     wire signed [INST_ADDR_WIDTH:0] id_pc_s;
     wire signed [INST_ADDR_WIDTH:0] id_off_s;
-    wire signed [INST_ADDR_WIDTH:0] id_br_s;
-    wire [INST_ADDR_WIDTH-1:0] id_branch_target;
 
     assign id_pc_s  = $signed({1'b0, id_pc});  // widen by 1 to reduce overflow weirdness
     assign id_off_s = $signed(id_imm_ext32[INST_ADDR_WIDTH:0]); // signed, includes sign bit
     assign id_br_s  = id_pc_s + id_off_s;
-
-    assign id_branch_target = id_br_s[INST_ADDR_WIDTH-1:0]; // wraps naturally in 9-bit space
 
     // ID/EX pipeline register
     reg id_ex_reg_write_en;
@@ -217,7 +228,6 @@ module gpu_core #(
     reg id_ex_mwrite_en;
     reg id_ex_tensor_tdot_en;
     reg id_ex_tensor_tdot_relu_en;
-    reg [3:0] id_ex_alu_op;
     reg [1:0] id_ex_alu_dtype;
     reg id_ex_alu_src;
     reg id_ex_result_sel;
@@ -319,12 +329,6 @@ module gpu_core #(
     // ============================================================
     // Freeze Unit
     // ============================================================
-    reg [3:0] freeze_counter;
-
-    wire is_multi_cycle =
-           (id_ex_alu_op == OP_MUL) ||
-           (id_ex_alu_op == OP_TDOT) ||
-           (id_ex_alu_op == OP_TDOT_RELU);
 
     always @(posedge clk or posedge reset) begin
         if (reset) begin
@@ -337,9 +341,6 @@ module gpu_core #(
             freeze_counter <= freeze_counter - 1;
         end
     end
-
-    wire pipeline_freeze;
-    assign pipeline_freeze = is_multi_cycle || (freeze_counter != 0);
 
     gpu_simd_alu simd_alu (
         // inputs

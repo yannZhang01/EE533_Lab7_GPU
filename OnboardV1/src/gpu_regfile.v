@@ -41,7 +41,7 @@ module gpu_regfile #(
     
 
     // Asynchronous read (simple and fast)
-    always @(*) begin
+    always @(gpu_rs1_addr or gpu_rs2_addr or reset) begin
         if (reset) begin
             gpu_rs1_data = 0;
             gpu_rs2_data = 0;

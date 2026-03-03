@@ -31,10 +31,28 @@ wire [INST_ADDR_WIDTH-1:0] if_pc_current;
 wire [INST_ADDR_WIDTH-1:0] if_pc_plus1;
 wire [INST_ADDR_WIDTH-1:0] if_pc_next_default;
 wire [INST_WIDTH-1:0]      if_imem_instr;
+wire [DATA_WIDTH-1:0] id_rs1_data;
+wire signed [INST_ADDR_WIDTH:0] id_br_s;
+
+assign id_br_s  = id_pc_s + id_off_s;
+
+wire pipeline_freeze;
+reg [3:0] freeze_counter;
+assign pipeline_freeze = is_multi_cycle || (freeze_counter != 0);
 
 // Sequential next PC (PC + 1).
 assign if_pc_plus1        = if_pc_current + 1'b1;
 assign if_pc_next_default = pipeline_freeze ? if_pc_current : if_pc_plus1;
+
+wire [3:0] id_instr_opcode_id;
+assign id_instr_opcode_id = id_instr[31:28];
+
+wire id_branch_taken;
+assign id_branch_taken = (id_instr_opcode_id == OP_BRZ) ? (id_rs1_data == 0) :
+                         (id_instr_opcode_id == OP_BRNZ) ? (id_rs1_data != 0) : 1'b0;
+
+wire [INST_ADDR_WIDTH-1:0] id_branch_target;
+assign id_branch_target = id_br_s[INST_ADDR_WIDTH-1:0]; // wraps naturally in 9-bit space
 
 // PC state register with redirect support
 gpu_pc #(.ADDR_WIDTH(INST_ADDR_WIDTH)) pc (
@@ -51,7 +69,7 @@ gpu_pc #(.ADDR_WIDTH(INST_ADDR_WIDTH)) pc (
     .pc_current(if_pc_current)
 );
 
-// Instruction memory read address comes from IF PC (NOT id_pc)
+// Instruction memory read address comes from IF PC
 gpu_imem #(.MEM_SIZE(512), .ADDR_WIDTH(INST_ADDR_WIDTH), .DATA_WIDTH(INST_WIDTH)) imem (
     .imem_read_addr(if_pc_current),
     .imem_write_addr(9'b0),
@@ -103,14 +121,12 @@ assign id_instr = if_id_instr;
 // [21:18] rs1 (source register 1)
 // [17:14] rs2 (source register 2)
 // [17:0]  imm (immediate value, can be sign-extended)
-wire [3:0] id_instr_opcode_id;
 wire [1:0] id_instr_dtype_id;
 wire [3:0] id_instr_rd_addr;
 wire [3:0] id_instr_rs1_addr;
 wire [3:0] id_instr_rs2_addr;
 wire [17:0]id_instr_imm;
 
-assign id_instr_opcode_id = id_instr[31:28];
 assign id_instr_dtype_id  = id_instr[27:26];
 assign id_instr_rd_addr   = id_instr[25:22];
 assign id_instr_rs1_addr  = id_instr[21:18];
@@ -132,8 +148,10 @@ assign id_imm_ext32 = {{14{id_instr_imm[17]}}, id_instr_imm}; // sign-extend to 
 assign id_imm_ext64 = {{32{id_imm_ext32[31]}}, id_imm_ext32}; // sign-extend to 64 bits
 
 // accept output of register file
-wire [DATA_WIDTH-1:0] id_rs1_data;
 wire [DATA_WIDTH-1:0] id_rs2_data;
+wire wb_reg_write_en;
+wire [REG_ADDR_WIDTH-1:0] wb_reg_write_addr;
+wire [DATA_WIDTH-1:0]     wb_reg_write_data;
 
 gpu_regfile #(.NUM_REGS(16), .DATA_WIDTH(DATA_WIDTH), .ADDR_WIDTH(REG_ADDR_WIDTH)) regfile (
     // inputs
@@ -184,21 +202,13 @@ gpu_control_unit control_unit (
 // ============================================================
 // Branch Unit
 // ============================================================
-wire id_branch_taken;
-assign id_branch_taken = (id_instr_opcode_id == OP_BRZ) ? (id_rs1_data == 0) :
-                         (id_instr_opcode_id == OP_BRNZ) ? (id_rs1_data != 0) : 1'b0;
 
 // Treat PC and offset as signed for branch target computation
 wire signed [INST_ADDR_WIDTH:0] id_pc_s;
 wire signed [INST_ADDR_WIDTH:0] id_off_s;
-wire signed [INST_ADDR_WIDTH:0] id_br_s;
-wire [INST_ADDR_WIDTH-1:0] id_branch_target;
 
 assign id_pc_s  = $signed({1'b0, id_pc});  // widen by 1 to reduce overflow weirdness
 assign id_off_s = $signed(id_imm_ext32[INST_ADDR_WIDTH:0]); // signed, includes sign bit
-assign id_br_s  = id_pc_s + id_off_s;
-
-assign id_branch_target = id_br_s[INST_ADDR_WIDTH-1:0]; // wraps naturally in 9-bit space
 
 // ID/EX pipeline register
 reg id_ex_reg_write_en;
@@ -308,8 +318,6 @@ assign ex_final_result = ex_result_sel ? ex_tensor_result : ex_alu_result;
 // ============================================================
 // Freeze Unit
 // ============================================================
-reg [3:0] freeze_counter;
-
 wire is_multi_cycle =
        (id_ex_alu_op == OP_MUL) ||
        (id_ex_alu_op == OP_TDOT) ||
@@ -326,8 +334,6 @@ always @(posedge clk or posedge reset) begin
         freeze_counter <= freeze_counter - 1;
     end
 end
-
-assign pipeline_freeze = is_multi_cycle || (freeze_counter != 0);
 
 gpu_simd_alu simd_alu (
     // inputs
@@ -458,15 +464,12 @@ end
 // ============================================================
 
 // accept control signals from MEM/WB register
-wire wb_reg_write_en;
 wire wb_mem2reg;
 
 assign wb_mem2reg = mem_wb_mem2reg;
 assign wb_reg_write_en = mem_wb_reg_write_en;
 
 // accept data signals from MEM/WB register
-wire [REG_ADDR_WIDTH-1:0] wb_reg_write_addr;
-wire [DATA_WIDTH-1:0]     wb_reg_write_data;
 wire [DATA_WIDTH-1:0]     wb_alu_result;
 wire [DATA_WIDTH-1:0]     wb_dmem_rdata;
  

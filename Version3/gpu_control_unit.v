@@ -37,7 +37,7 @@ module gpu_control_unit (
     localparam OP_TDOT       = 4'b1110;
     localparam OP_TDOT_RELU  = 4'b1111;
 
-    always @(*) begin
+    always @(opcode_id or dtype_id) begin
         // defaults
         ctrl_reg_write        = 1'b0;
         ctrl_mem_read         = 1'b0;
