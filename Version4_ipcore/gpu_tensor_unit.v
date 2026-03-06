@@ -14,7 +14,7 @@ module gpu_tensor_unit (
     reg signed [31:0] m0,m1,m2,m3;
     reg signed [63:0] sum;
 
-    always @(*) begin
+    always @(tensor_input_1 or tensor_input_2 or tensor_relu) begin
 
         // Unpack (lane0 = lowest 16 bits)
         a0 = tensor_input_1[15:0];

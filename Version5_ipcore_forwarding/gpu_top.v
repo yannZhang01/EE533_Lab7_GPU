@@ -31,6 +31,14 @@ wire id_branch_taken;
 wire [INST_ADDR_WIDTH-1:0] id_branch_target;
 
 // ============================================================
+// Pipeline_stall Unit
+// ============================================================
+wire pipeline_stall;
+assign pipeline_stall = (id_instr_rs1_addr != 0) && (id_instr_rs1_addr == id_ex_rd_addr) && id_ex_mread_en ||
+                        (id_instr_rs2_addr != 0) && (id_instr_rs2_addr == id_ex_rd_addr) && id_ex_mread_en && (!id_is_itype) ||
+                        (id_instr_rd_addr != 0) && (id_instr_rd_addr == id_ex_rd_addr) && id_ex_mread_en && id_is_itype;
+
+// ============================================================
 // IF1 stage
 // ============================================================
 
@@ -43,7 +51,7 @@ wire pipeline_freeze; // signal to stall the pipeline (e.g., for multi-cycle ops
 
 // Sequential next PC (PC + 1).
 assign if1_pc_plus1        = if1_pc_current + 1'b1;
-assign if1_pc_next_default = pipeline_freeze ? if1_pc_current : if1_pc_plus1;
+assign if1_pc_next_default = (pipeline_freeze || pipeline_stall) ? if1_pc_current : if1_pc_plus1;
 
 // PC state register with redirect support
 gpu_pc #(.ADDR_WIDTH(INST_ADDR_WIDTH)) pc (
@@ -81,7 +89,7 @@ always @(posedge clk or posedge reset) begin
         if1_if2_pc <= {INST_ADDR_WIDTH{1'b0}};
     end else if (if1_if2_flush) begin
         if1_if2_pc <= if1_pc_current;
-    end else if (pipeline_freeze) begin
+    end else if (pipeline_freeze || pipeline_stall) begin
         // hold
     end else begin
         if1_if2_pc <= if1_pc_current;
@@ -96,24 +104,42 @@ assign if2_pc = if1_if2_pc;
 // ------------------------------------------------------------
 // IF flush: kill the stale instruction returned AFTER a taken branch
 // ------------------------------------------------------------
+// hold the control signals for one cycle
 reg if_flush_q;
+reg if_stall_q;
+reg if_freeze_q;
 
 always @(posedge clk or posedge reset) begin
     if (reset) begin
         if_flush_q <= 1'b0;
+        if_stall_q <= 1'b0;
+        if_freeze_q <= 1'b0;
     end else begin
         if_flush_q <= if1_if2_flush;
+        if_stall_q <= pipeline_stall;
+        if_freeze_q <= pipeline_freeze;
+    end
+end
+
+// Buffer to hold the instruction in case we need to stall or freeze the pipeline
+reg [INST_WIDTH-1:0] instr_buffer;
+
+always @(posedge clk or posedge reset) begin
+    if (reset) begin
+        instr_buffer <= {INST_WIDTH{1'b0}};
+    end else begin
+        instr_buffer <= if2_imem_instr;
     end
 end
 
 // Use flush to NOP the returning stale instruction
-assign imem_instr = if_flush_q ? {INST_WIDTH{1'b0}} : if2_imem_instr;
+assign imem_instr = if_flush_q ? {INST_WIDTH{1'b0}} : (if_stall_q || if_freeze_q) ? instr_buffer :if2_imem_instr;
 
-// IF/ID pipeline register (pc tag + instr)
+// IF2/ID pipeline register (pc tag + instr)
 reg [INST_WIDTH-1:0]       if2_id_instr;
 reg [INST_ADDR_WIDTH-1:0]  if2_id_pc;
 
-// Update IF/ID pipeline register on clock edge
+// Update IF2/ID pipeline register on clock edge
 always @(posedge clk or posedge reset) begin
     if (reset) begin
         if2_id_instr <= {INST_WIDTH{1'b0}};
@@ -121,7 +147,7 @@ always @(posedge clk or posedge reset) begin
     end else if (if1_if2_flush) begin
         if2_id_instr <= {INST_WIDTH{1'b0}};   // NOP
         if2_id_pc    <= if2_pc;            // not critical for NOP, but keeps waveform sane
-    end else if (pipeline_freeze) begin
+    end else if (pipeline_freeze || pipeline_stall) begin
         // remain current value
     end else begin
         if2_id_instr <= imem_instr;
@@ -254,6 +280,23 @@ assign id_br_s  = id_pc_s + id_off_s;
 
 assign id_branch_target = id_br_s[INST_ADDR_WIDTH-1:0]; // wraps naturally in 9-bit space
 
+// ============================================================
+// Forwarding Unit
+// ============================================================
+
+// rs1 forwarding
+// - from EX stage
+// - from MEM2 stage : ex_final_result
+// - from MEM2 stage : dmem_rdata
+// - from WB stage
+//mem2_reg_write_addr TODO: generate forwarding control signal
+
+
+// rs2 forwarding
+
+
+
+
 // ID/EX pipeline register
 reg id_ex_reg_write_en;
 reg id_ex_mread_en;
@@ -273,7 +316,7 @@ reg [DATA_WIDTH-1:0] id_ex_imm_ext64;
 
 // Update ID/EX pipeline register on clock edge
 always @(posedge clk or posedge reset) begin
-    if (reset) begin
+    if (reset || pipeline_stall) begin
         id_ex_reg_write_en <= 0;
         id_ex_mread_en <= 0;
         id_ex_mwrite_en <= 0;
@@ -306,9 +349,11 @@ always @(posedge clk or posedge reset) begin
 
         // data signals
         id_ex_rd_addr <= id_instr_rd_addr; // pass through rd address
-        id_ex_rs1_data <= id_rs1_data;     // pass through rs1 data
-        id_ex_rs2_data <= id_rs2_data;     // pass through rs2 data
         id_ex_imm_ext64 <= id_imm_ext64; // pass through sign-extended immediate
+
+        id_ex_rs1_data <= id_rs1_data;     // pass through rs1 data
+
+        id_ex_rs2_data <= id_rs2_data;     // pass through rs2 data
     end
 end
 
@@ -487,7 +532,7 @@ gpu_dmem_ip dmem (
 );
 
 // ============================================================
-// DMEM stage
+// DMEM(MEM2) stage
 // ============================================================
 // DMEM pipeline registers
 reg mem1_mem2_reg_write_en;
