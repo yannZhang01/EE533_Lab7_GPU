@@ -33,10 +33,14 @@ wire [INST_ADDR_WIDTH-1:0] id_branch_target;
 // ============================================================
 // Pipeline_stall Unit
 // ============================================================
+wire [REG_ADDR_WIDTH-1:0] ex_reg_write_addr;
+wire [REG_ADDR_WIDTH-1:0] id_reg_rs1_addr;
+wire [REG_ADDR_WIDTH-1:0] id_reg_rs2_addr;
+wire ex_reg_write_en;
+wire ex_mread_en;
 wire pipeline_stall;
-assign pipeline_stall = (id_instr_rs1_addr != 0) && (id_instr_rs1_addr == id_ex_rd_addr) && id_ex_mread_en ||
-                        (id_instr_rs2_addr != 0) && (id_instr_rs2_addr == id_ex_rd_addr) && id_ex_mread_en && (!id_is_itype) ||
-                        (id_instr_rd_addr != 0) && (id_instr_rd_addr == id_ex_rd_addr) && id_ex_mread_en && id_is_itype;
+assign pipeline_stall = (id_reg_rs1_addr != 0) && (id_reg_rs1_addr == ex_reg_write_addr) && ex_mread_en ||
+                        (id_reg_rs2_addr != 0) && (id_reg_rs2_addr == ex_reg_write_addr) && ex_mread_en;
 
 // ============================================================
 // IF1 stage
@@ -58,7 +62,7 @@ gpu_pc #(.ADDR_WIDTH(INST_ADDR_WIDTH)) pc (
     .clk(clk),
     .reset(reset),
 
-    .pc_enable(1'b1),  // TODO: connect to hazard stall later
+    .pc_enable(1'b1),
 
     .pc_branch_valid(id_branch_taken),
     .pc_branch_target(id_branch_target),
@@ -188,8 +192,6 @@ assign id_instr_rs1_addr  = id_instr[21:18];
 assign id_instr_rs2_addr  = id_instr[17:14];
 assign id_instr_imm       = id_instr[17:0];
 
-wire [REG_ADDR_WIDTH-1:0] id_reg_rs1_addr;
-wire [REG_ADDR_WIDTH-1:0] id_reg_rs2_addr;
 wire id_is_itype;
 
 assign id_reg_rs1_addr = id_instr_rs1_addr;
@@ -266,8 +268,8 @@ gpu_control_unit control_unit (
 // ============================================================
 // Branch Unit
 // ============================================================
-assign id_branch_taken = (id_instr_opcode_id == OP_BRZ) ? (id_rs1_data == 0) :
-                         (id_instr_opcode_id == OP_BRNZ) ? (id_rs1_data != 0) : 1'b0;
+assign id_branch_taken = (id_instr_opcode_id == OP_BRZ) ? (id_rs1_forwarded_data == 0) :
+                         (id_instr_opcode_id == OP_BRNZ) ? (id_rs1_forwarded_data != 0) : 1'b0;
 
 // Treat PC and offset as signed for branch target computation
 wire signed [INST_ADDR_WIDTH:0] id_pc_s;
@@ -283,19 +285,96 @@ assign id_branch_target = id_br_s[INST_ADDR_WIDTH-1:0]; // wraps naturally in 9-
 // ============================================================
 // Forwarding Unit
 // ============================================================
+wire [REG_ADDR_WIDTH-1:0] ex_regfile_rs1_addr;
+wire [REG_ADDR_WIDTH-1:0] ex_regfile_rs2_addr;
+wire [REG_ADDR_WIDTH-1:0] mem2_reg_write_addr;
+wire mem2_reg_write_en;
+wire mem2_mem2reg;
+// Intermediate signals to determine if source/dest registers match between ID stage and later stages for forwarding decisions
+// match rs1
+wire idrs1_equ_exrd;
+assign idrs1_equ_exrd = (id_reg_rs1_addr != 0) && (id_reg_rs1_addr == ex_reg_write_addr);
+wire idrs1_equ_mem2rd;
+assign idrs1_equ_mem2rd = (id_reg_rs1_addr != 0) && (id_reg_rs1_addr == mem2_reg_write_addr);
+wire idrs1_equ_wbrd;
+assign idrs1_equ_wbrd = (id_reg_rs1_addr != 0) && (id_reg_rs1_addr == wb_reg_write_addr);
+// match rs2
+wire idrs2_equ_exrd;
+assign idrs2_equ_exrd = (id_reg_rs2_addr != 0) && (id_reg_rs2_addr == ex_reg_write_addr);
+wire idrs2_equ_mem2rd;
+assign idrs2_equ_mem2rd = (id_reg_rs2_addr != 0) && (id_reg_rs2_addr == mem2_reg_write_addr);
+wire idrs2_equ_wbrd;
+assign idrs2_equ_wbrd = (id_reg_rs2_addr != 0) && (id_reg_rs2_addr == wb_reg_write_addr);
 
+// Forwarding for source registers in ID stage
 // rs1 forwarding
 // - from EX stage
+wire id_rs1_forward_ex;
+assign id_rs1_forward_ex = idrs1_equ_exrd && ex_reg_write_en && !ex_mread_en;
 // - from MEM2 stage : ex_final_result
+wire id_rs1_forward_mem2_exfinal;
+assign id_rs1_forward_mem2_exfinal = idrs1_equ_mem2rd && mem2_reg_write_en && !mem2_mem2reg;
 // - from MEM2 stage : dmem_rdata
+wire id_rs1_forward_mem2_dmem;
+assign id_rs1_forward_mem2_dmem = idrs1_equ_mem2rd && mem2_reg_write_en && mem2_mem2reg; 
 // - from WB stage
-//mem2_reg_write_addr TODO: generate forwarding control signal
-
+wire id_rs1_forward_wb;
+assign id_rs1_forward_wb = idrs1_equ_wbrd && wb_reg_write_en;
 
 // rs2 forwarding
+// - from EX stage
+wire id_rs2_forward_ex;
+assign id_rs2_forward_ex = idrs2_equ_exrd && ex_reg_write_en && !ex_mread_en;
+// - from MEM2 stage : ex_final_result
+wire id_rs2_forward_mem2_exfinal;
+assign id_rs2_forward_mem2_exfinal = idrs2_equ_mem2rd && mem2_reg_write_en && !mem2_mem2reg;
+// - from MEM2 stage : dmem_rdata
+wire id_rs2_forward_mem2_dmem;
+assign id_rs2_forward_mem2_dmem = idrs2_equ_mem2rd && mem2_reg_write_en && mem2_mem2reg;
+// - from WB stage
+wire id_rs2_forward_wb;
+assign id_rs2_forward_wb = idrs2_equ_wbrd && wb_reg_write_en;
 
+// Intermediate signals to determine if source/dest registers match between EX stage and later stages for forwarding decisions
+// match rs1
+wire exrs1_equ_mem2rd;
+assign exrs1_equ_mem2rd = (ex_regfile_rs1_addr != 0) && (ex_regfile_rs1_addr == mem2_reg_write_addr);
+// match rs2
+wire exrs2_equ_mem2rd;
+assign exrs2_equ_mem2rd = (ex_regfile_rs2_addr != 0) && (ex_regfile_rs2_addr == mem2_reg_write_addr);
 
+// Forwarding for source registers in EX stage
+// rs1 forwarding
+// - from MEM2 stage : ex_final_result
+wire ex_rs1_forward_mem2_exfinal;
+assign ex_rs1_forward_mem2_exfinal = exrs1_equ_mem2rd && mem2_reg_write_en && !mem2_mem2reg;
+// - from MEM2 stage : dmem_rdata
+wire ex_rs1_forward_mem2_dmem;
+assign ex_rs1_forward_mem2_dmem = exrs1_equ_mem2rd && mem2_reg_write_en && mem2_mem2reg; 
 
+// rs2 forwarding
+// - from MEM2 stage : ex_final_result
+wire ex_rs2_forward_mem2_exfinal;
+assign ex_rs2_forward_mem2_exfinal = exrs2_equ_mem2rd && mem2_reg_write_en && !mem2_mem2reg;
+// - from MEM2 stage : dmem_rdata
+wire ex_rs2_forward_mem2_dmem;
+assign ex_rs2_forward_mem2_dmem = exrs2_equ_mem2rd && mem2_reg_write_en && mem2_mem2reg; 
+
+wire [DATA_WIDTH-1:0] ex_final_result;
+wire [DATA_WIDTH-1:0] mem2_exfinal_result;
+wire [DATA_WIDTH-1:0] mem_dmem_rdata;
+
+wire [DATA_WIDTH-1:0] id_rs1_forwarded_data;
+assign id_rs1_forwarded_data= id_rs1_forward_ex ? ex_final_result : 
+                                id_rs1_forward_mem2_exfinal ? mem2_exfinal_result : 
+                                    id_rs1_forward_mem2_dmem ? mem_dmem_rdata : 
+                                        id_rs1_forward_wb ? wb_reg_write_data : id_rs1_data;
+
+wire [DATA_WIDTH-1:0] id_rs2_forwarded_data;
+assign id_rs2_forwarded_data= id_rs2_forward_ex ? ex_final_result : 
+                                id_rs2_forward_mem2_exfinal ? mem2_exfinal_result : 
+                                    id_rs2_forward_mem2_dmem ? mem_dmem_rdata : 
+                                        id_rs2_forward_wb ? wb_reg_write_data : id_rs2_data;
 
 // ID/EX pipeline register
 reg id_ex_reg_write_en;
@@ -310,13 +389,15 @@ reg id_ex_result_sel;
 reg id_ex_mem2reg;
 
 reg [REG_ADDR_WIDTH-1:0] id_ex_rd_addr;
+reg [REG_ADDR_WIDTH-1:0] id_ex_regfile_rs1_addr;
+reg [REG_ADDR_WIDTH-1:0] id_ex_regfile_rs2_addr;
 reg [DATA_WIDTH-1:0] id_ex_rs1_data;
 reg [DATA_WIDTH-1:0] id_ex_rs2_data;
 reg [DATA_WIDTH-1:0] id_ex_imm_ext64;
 
 // Update ID/EX pipeline register on clock edge
 always @(posedge clk or posedge reset) begin
-    if (reset || pipeline_stall) begin
+    if (reset) begin
         id_ex_reg_write_en <= 0;
         id_ex_mread_en <= 0;
         id_ex_mwrite_en <= 0;
@@ -329,11 +410,31 @@ always @(posedge clk or posedge reset) begin
         id_ex_mem2reg <= 0;
 
         id_ex_rd_addr <= 0;
+        id_ex_regfile_rs1_addr <= 0;
+        id_ex_regfile_rs2_addr <= 0;
         id_ex_rs1_data <= 0;
         id_ex_rs2_data <= 0;
         id_ex_imm_ext64 <= 0;
     end else if (pipeline_freeze) begin
         // remain current value
+    end else if (pipeline_stall) begin
+        id_ex_reg_write_en <= 0;
+        id_ex_mread_en <= 0;
+        id_ex_mwrite_en <= 0;
+        id_ex_tensor_tdot_en <= 0;
+        id_ex_tensor_tdot_relu_en <= 0;
+        id_ex_alu_op <= 0;
+        id_ex_alu_dtype <= 0;
+        id_ex_alu_src <= 0;
+        id_ex_result_sel <= 0;
+        id_ex_mem2reg <= 0;
+
+        id_ex_rd_addr <= 0;
+        id_ex_regfile_rs1_addr <= 0;
+        id_ex_regfile_rs2_addr <= 0;
+        id_ex_rs1_data <= 0;
+        id_ex_rs2_data <= 0;
+        id_ex_imm_ext64 <= 0;
     end else begin
         // control signals
         id_ex_reg_write_en <= id_reg_write_en;
@@ -349,11 +450,12 @@ always @(posedge clk or posedge reset) begin
 
         // data signals
         id_ex_rd_addr <= id_instr_rd_addr; // pass through rd address
+        id_ex_regfile_rs1_addr <= id_reg_rs1_addr; // pass through rs1 address
+        id_ex_regfile_rs2_addr <= id_reg_rs2_addr; // pass through rs2 address
         id_ex_imm_ext64 <= id_imm_ext64; // pass through sign-extended immediate
 
-        id_ex_rs1_data <= id_rs1_data;     // pass through rs1 data
-
-        id_ex_rs2_data <= id_rs2_data;     // pass through rs2 data
+        id_ex_rs1_data <= id_rs1_forwarded_data;    // pass through rs1 data with forwarding
+        id_ex_rs2_data <= id_rs2_forwarded_data;     // pass through rs2 data with forwarding
     end
 end
 
@@ -366,11 +468,8 @@ wire [DATA_WIDTH-1:0] ex_rs1_data;
 wire [DATA_WIDTH-1:0] ex_rs2_data;
 wire [DATA_WIDTH-1:0] ex_alu_src1;
 wire [DATA_WIDTH-1:0] ex_alu_src2;
-wire [REG_ADDR_WIDTH-1:0] ex_reg_write_addr;
 
 // accept control signals from ID/EX register
-wire ex_reg_write_en;
-wire ex_mread_en;
 wire ex_mwrite_en;
 wire ex_tensor_tdot_en;
 wire ex_tensor_tdot_relu_en;
@@ -380,12 +479,17 @@ wire ex_alu_src;
 wire ex_result_sel;
 wire ex_mem2reg;
 
-assign ex_rs1_data = id_ex_rs1_data;
-assign ex_rs2_data = id_ex_rs2_data;
-assign ex_reg_write_addr = id_ex_rd_addr;
+assign ex_rs1_data = ex_rs1_forward_mem2_exfinal ? mem2_exfinal_result : 
+                       ex_rs1_forward_mem2_dmem ? mem_dmem_rdata : id_ex_rs1_data;
+assign ex_rs2_data = ex_rs2_forward_mem2_exfinal ? mem2_exfinal_result : 
+                       ex_rs2_forward_mem2_dmem ? mem_dmem_rdata : id_ex_rs2_data;
 
-assign ex_alu_src1 = id_ex_rs1_data;
-assign ex_alu_src2 = ex_alu_src ? id_ex_imm_ext64 : id_ex_rs2_data;
+assign ex_reg_write_addr = id_ex_rd_addr;
+assign ex_regfile_rs1_addr = id_ex_regfile_rs1_addr;
+assign ex_regfile_rs2_addr = id_ex_regfile_rs2_addr;
+
+assign ex_alu_src1 = ex_rs1_data;
+assign ex_alu_src2 = ex_alu_src ? id_ex_imm_ext64 : ex_rs2_data;
 
 assign ex_reg_write_en = id_ex_reg_write_en;
 assign ex_mread_en = id_ex_mread_en;
@@ -401,7 +505,6 @@ assign ex_mem2reg = id_ex_mem2reg;
 wire [DATA_WIDTH-1:0] ex_alu_result;
 wire [DATA_WIDTH-1:0] ex_tensor_result;
 
-wire [DATA_WIDTH-1:0] ex_final_result;
 assign ex_final_result = ex_result_sel ? ex_tensor_result : ex_alu_result;
 
 // ============================================================
@@ -510,8 +613,6 @@ assign mem_mread_en = ex_mem_mread_en;
 assign mem_mwrite_en = ex_mem_mwrite_en;
 assign mem_mem2reg = ex_mem_mem2reg;
 
-wire [DATA_WIDTH-1:0] mem_dmem_rdata;
-
 wire [DATA_ADDR_WIDTH-1:0] dmem_addr_store = mem_exfinal_result[DATA_ADDR_WIDTH-1:0];
 wire [DATA_ADDR_WIDTH-1:0] dmem_addr_load  = mem_exfinal_result[DATA_ADDR_WIDTH-1:0];
 
@@ -558,18 +659,13 @@ always @(posedge clk or posedge reset) begin
 end
 
 // accept data signals from DMEM register
-wire [REG_ADDR_WIDTH-1:0] mem2_reg_write_addr;
 
 assign mem2_reg_write_addr = mem1_mem2_reg_write_addr; // pass through for write back address
 
 // accept control signals from DMEM register
-wire mem2_reg_write_en;
-wire mem2_mem2reg;
 
 assign mem2_reg_write_en = mem1_mem2_reg_write_en;
 assign mem2_mem2reg = mem1_mem2_mem2reg;
-
-wire [DATA_WIDTH-1:0] mem2_exfinal_result;
 
 assign mem2_exfinal_result = mem1_mem2_exfinal_result; // pass through ALU result for write back
 
