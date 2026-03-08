@@ -130,20 +130,6 @@ always @(posedge clk or posedge reset) begin
     end
 end
 
-// Buffer to hold the instruction in case we need to stall or freeze the pipeline
-reg [INST_WIDTH-1:0] instr_buffer;
-
-always @(posedge clk or posedge reset) begin
-    if (reset) begin
-        instr_buffer <= {INST_WIDTH{1'b0}};
-    end else begin
-        instr_buffer <= if2_imem_instr;
-    end
-end
-
-// Use flush to NOP the returning stale instruction
-assign imem_instr = if_flush_q ? {INST_WIDTH{1'b0}} : (if_stall_q || if_freeze_q) ? instr_buffer :if2_imem_instr;
-
 // IF2/ID pipeline register (pc tag + instr)
 reg [INST_WIDTH-1:0]       if2_id_instr;
 reg [INST_ADDR_WIDTH-1:0]  if2_id_pc;
@@ -525,25 +511,55 @@ assign ex_final_result = ex_result_sel ? ex_tensor_result : ex_alu_result;
 // Freeze Unit
 // ============================================================
 reg [3:0] freeze_counter;
+reg       ex_multicycle_seen;
 
 wire is_multi_cycle =
        (id_ex_alu_op == OP_MUL) ||
        (id_ex_alu_op == OP_TDOT) ||
        (id_ex_alu_op == OP_TDOT_RELU);
 
+// Fire only once when a new multi-cycle instruction first appears in EX
+wire start_freeze = is_multi_cycle && !ex_multicycle_seen;
+
+// Buffer to hold the instruction in case we need to stall or freeze the pipeline
+reg [INST_WIDTH-1:0] instr_buffer;
+
 always @(posedge clk or posedge reset) begin
     if (reset) begin
-        freeze_counter <= 0;
-    end
-    else if (is_multi_cycle && freeze_counter == 0) begin
-        freeze_counter <= FREEZE_CLOCK - 1;
-    end
-    else if (freeze_counter != 0) begin
-        freeze_counter <= freeze_counter - 1;
+        instr_buffer <= {INST_WIDTH{1'b0}};
+    end else if (start_freeze || pipeline_stall) begin
+        instr_buffer <= if2_imem_instr;
     end
 end
 
-assign pipeline_freeze = is_multi_cycle || (freeze_counter != 0) || tb_freeze;
+// Use flush to NOP the returning stale instruction
+assign imem_instr = if_flush_q ? {INST_WIDTH{1'b0}} : (if_stall_q || if_freeze_q) ? instr_buffer :if2_imem_instr;
+
+// Freeze immediately in the current cycle, then keep freezing while counter runs
+assign pipeline_freeze = start_freeze || (freeze_counter != 0) || tb_freeze;
+
+always @(posedge clk or posedge reset) begin
+    if (reset) begin
+        freeze_counter      <= 0;
+        ex_multicycle_seen  <= 0;
+    end
+    else begin
+        // Mark that current EX multi-cycle instruction has been recognized
+        if (start_freeze)
+            ex_multicycle_seen <= 1;
+        // Clear mark once EX is no longer holding that multi-cycle instruction
+        else if (!is_multi_cycle)
+            ex_multicycle_seen <= 0;
+
+        // Load counter when multi-cycle instruction is first seen
+        if (start_freeze) begin
+            freeze_counter <= (FREEZE_CLOCK > 0) ? (FREEZE_CLOCK - 1) : 0;
+        end
+        else if (freeze_counter != 0) begin
+            freeze_counter <= freeze_counter - 1;
+        end
+    end
+end
 
 gpu_simd_alu simd_alu (
     // inputs
