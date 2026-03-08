@@ -71,28 +71,30 @@ module tb_gpu_top;
     // NOTE: ISE Verilog dislikes slicing expressions like (A+B)[7:0],
     // so we use a temporary reg [DMEM_AW-1:0] for addresses.
     // ------------------------------------------------------------
-    task bootstrap_shadow_from_dmem;
-        integer idx;
-        reg [DMEM_AW-1:0] addr;
-        reg [DMEM_DW-1:0] rdata;
-        begin
-            // Prime: apply address SORT_BASE and wait one cycle
-            addr = SORT_BASE;
-            force dut.dmem.addrb = addr;
-            @(posedge clk);
+		task bootstrap_shadow_from_dmem;
+			 integer idx;
+			 reg [DMEM_AW-1:0] addr;
+			 reg [DMEM_DW-1:0] rdata;
+			 begin
+				  addr = SORT_BASE;
+				  force dut.dmem.addrb = addr;
+				  @(posedge clk);
 
-            // Loop: set next address, then sample doutb for previous address
-            for (idx = 0; idx < SORT_LEN; idx = idx + 1) begin
-                addr = SORT_BASE + idx;
-                force dut.dmem.addrb = addr;
-                @(posedge clk);
-                rdata = dut.dmem.doutb;
-                shadow_mem[SORT_BASE + idx] = rdata;
-            end
+				  for (idx = 1; idx < SORT_LEN; idx = idx + 1) begin
+						addr = SORT_BASE + idx;
+						force dut.dmem.addrb = addr;
+						@(posedge clk);
+						rdata = dut.dmem.doutb;
+						shadow_mem[SORT_BASE + idx - 1] = rdata;
+				  end
 
-            release dut.dmem.addrb;
-        end
-    endtask
+				  @(posedge clk);
+				  rdata = dut.dmem.doutb;
+				  shadow_mem[SORT_BASE + SORT_LEN - 1] = rdata;
+
+				  release dut.dmem.addrb;
+			 end
+		endtask
 
     // ------------------------------------------------------------
     // Runtime tracking: update shadow_mem on every DMEM write

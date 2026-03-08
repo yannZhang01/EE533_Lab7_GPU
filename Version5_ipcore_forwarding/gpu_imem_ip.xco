@@ -1,7 +1,7 @@
 ##############################################################
 #
 # Xilinx Core Generator version K.31
-# Date: Fri Mar 06 03:59:54 2026
+# Date: Fri Mar 06 23:41:09 2026
 #
 ##############################################################
 #
@@ -18,16 +18,16 @@ SET asysymbol = True
 SET busformat = BusFormatAngleBracketNotRipped
 SET createndf = False
 SET designentry = VHDL
-SET device = xc2vp20
+SET device = xc2vp50
 SET devicefamily = virtex2p
 SET flowvendor = Foundation_iSE
 SET formalverification = False
 SET foundationsym = False
 SET implementationfiletype = Ngc
-SET package = ff896
+SET package = ff1152
 SET removerpms = False
 SET simulationfiles = Behavioral
-SET speedgrade = -6
+SET speedgrade = -7
 SET verilogsim = True
 SET vhdlsim = True
 # END Project Options
@@ -37,7 +37,7 @@ SELECT Single_Port_Block_Memory family Xilinx,_Inc. 6.2
 # BEGIN Parameters
 CSET active_clock_edge=Rising_Edge_Triggered
 CSET additional_output_pipe_stages=0
-CSET coefficient_file=C:\GPU_ipcore\gpu_imem_init.coe
+CSET coefficient_file=C:\GPU_fullversion\gpu_imem_init.coe
 CSET component_name=gpu_imem_ip
 CSET depth=512
 CSET disable_warning_messages=true
@@ -60,5 +60,5 @@ CSET write_enable_polarity=Active_High
 CSET write_mode=Read_After_Write
 # END Parameters
 GENERATE
-# CRC: 8a5c28c3
+# CRC: 9fd6d666
 
